@@ -1,0 +1,23 @@
+.DS_Store
+texput.log
+tmp/
+
+# LaTeX build intermediates
+*.aux
+*.log
+*.nav
+*.out
+*.snm
+*.toc
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+
+# Generated inspection/archive artifacts
+*.inspect.ndjson
+outputs/advanced-distributed-systems-2026/advanced-distributed-systems-2026-all-weeks.zip
+
+# Original reference materials are kept locally and are not uploaded
+参考书/
+参考课件/
+outputs/advanced-distributed-systems-2026-latex/source-2025-pdf/

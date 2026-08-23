@@ -1,0 +1,525 @@
+\documentclass[UTF8,fontset=none,aspectratio=169,10pt]{beamer}
+\usepackage{ads-beamer-theme}
+\title{高级分布式系统}
+\subtitle{第十一讲：分布式死锁与全局谓词检测}
+\author{陈鹏飞\quad 计算机学院}
+\institute{中山大学}
+\date{2025--2026 学年}
+
+\begin{document}
+\begin{frame}[plain]
+\begin{tikzpicture}[remember picture,overlay]
+  \fill[ADSBlue] (current page.north west) rectangle ([xshift=2.4cm]current page.south west);
+  \fill[ADSOrange] ([xshift=2.4cm]current page.north west) rectangle ([xshift=2.55cm]current page.south west);
+  \node[anchor=west,align=left] at ([xshift=3.3cm,yshift=1.0cm]current page.west) {\fontsize{32}{38}\selectfont\color{ADSBlue}\bfseries 高级分布式系统};
+  \node[anchor=west,align=left] at ([xshift=3.3cm,yshift=-0.4cm]current page.west) {\fontsize{21}{27}\selectfont\color{ADSDarkBlue}第十一讲\quad 分布式死锁与全局谓词};
+  \node[anchor=west,align=left] at ([xshift=3.3cm,yshift=-2.2cm]current page.west) {\large\color{ADSGray}等待环、稳定性质与“可能/必然”两种全局判断};
+  \node[anchor=east] at ([xshift=-0.8cm,yshift=-3.2cm]current page.east) {\small\color{ADSGray}陈鹏飞\quad 中山大学\quad 2025--2026};
+  \draw[ADSBlue,line width=0.8pt] ([xshift=3.3cm,yshift=-1.35cm]current page.west) -- ([xshift=12.6cm,yshift=-1.35cm]current page.west);
+\end{tikzpicture}
+\end{frame}
+
+\sectionframe{一、死锁为什么在分布式系统里更难？}{没有共享内存、没有全局时钟、消息会延迟；“等待关系”本身也在不断变化。}
+
+\begin{frame}{本讲学习目标}
+\begin{enumerate}
+  \item 用 Wait-For Graph（WFG）描述分布式死锁；
+  \item 区分死锁预防、避免、检测和恢复；
+  \item 解释 single-resource、AND、OR、AND-OR 模型的差异；
+  \item 理解全局谓词、稳定谓词、可能成立和必然成立；
+  \item 把死锁/全局检测迁移到微服务、工作流和 AI 训练集群。
+\end{enumerate}
+\vfill
+\callout{主线}{先把“谁在等谁”画出来，再讨论什么时候这张图足以证明死锁，最后处理观察不一致的问题。}
+\end{frame}
+
+\begin{frame}{死锁的直觉}
+\begin{itemize}
+  \item 进程持有一部分资源，同时等待其他资源；
+  \item 每个等待者都依赖另一个等待者释放资源；
+  \item 若等待依赖形成闭环，任何一个进程都无法自行推进；
+  \item 分布式系统中，闭环的边可能位于不同机器、不同服务和不同网络路径上。
+\end{itemize}
+\vfill
+\callout{与第十讲的区别}{互斥只保证同一资源一次一个；死锁关注多个资源之间的组合等待。}
+\end{frame}
+
+\begin{frame}{Wait-For Graph（WFG）}
+\begin{center}
+\begin{tikzpicture}[>=Latex,node distance=13mm and 18mm]
+  \nodebox{ADSBlue}{p1}{P1};\nodebox[right=of p1]{ADSOrange}{p2}{P2};\nodebox[below=of p2]{ADSGreen}{p3}{P3};\nodebox[below=of p1]{ADSDarkBlue}{p4}{P4};
+  \draw[\arrow,ADSGray] (p1)--node[above,font=\scriptsize]{等待 R2}(p2);
+  \draw[\arrow,ADSGray] (p2)--node[right,font=\scriptsize]{等待 R3}(p3);
+  \draw[\arrow,ADSGray] (p3)--node[below,font=\scriptsize]{等待 R1}(p1);
+  \draw[\arrow,ADSGray] (p4)--node[left,font=\scriptsize]{等待 R2}(p2);
+\end{tikzpicture}
+\end{center}
+\begin{itemize}
+  \item 节点是进程；边 $P_i\to P_j$ 表示 $P_i$ 等待 $P_j$ 释放资源；
+  \item $P_1\to P_2\to P_3\to P_1$ 是等待环；
+  \item P4 不在环中，但可能被环中的 P2 间接阻塞。
+\end{itemize}
+\end{frame}
+
+\begin{frame}{死锁处理的四条路线}
+\begin{tabularx}{\linewidth}{>{\bfseries}p{2.7cm}XX}
+\toprule
+预防 & 破坏必要条件，例如固定资源顺序、一次性申请全部资源 & 保守，利用率低 \\
+避免 & 只有安全状态才授予资源 & 需要知道未来需求，分布式上难 \\
+检测 & 允许等待，周期性搜索 WFG 中的死锁 & 灵活，需处理观察延迟 \\
+恢复 & 回滚、抢占或终止部分进程，打破等待边 & 需要选择受害者并清理状态 \\
+\bottomrule
+\end{tabularx}
+\vfill
+\callout{工程取舍}{分布式系统通常更偏向检测 + 恢复，因为预防和避免会牺牲吞吐量与可用性。}
+\end{frame}
+
+\sectionframe{二、死锁模型与正确性}{不同请求模型决定“环”是否足以证明死锁；不能把一个模型的判据直接套到另一个模型。}
+
+\begin{frame}{系统模型}
+\begin{itemize}
+  \item 异步进程通过消息传递通信；
+  \item 没有共享内存和全局时钟；
+  \item 资源是可复用的，每个资源只有一个副本，进程独占访问；
+  \item 进程处于 running 或 blocked；
+  \item 消息可能乱序、重复、丢失，节点和链路可能失败。
+\end{itemize}
+\vfill
+\callout{模型边界}{后续 Chandy--Misra--Haas probe 的正确性先在“可靠信道、无进程崩溃、等待边可验证”的基础模型中讨论；丢失/故障场景需要可靠重传、epoch 和故障检测扩展。}
+\vfill
+\smallnote{检测者拿到的 WFG 可能已经过时：一条等待边刚删除，另一条边又刚创建。}
+\end{frame}
+
+\begin{frame}{Single Resource Model}
+\begin{itemize}
+  \item 每个进程最多等待一个资源的一个单位；
+  \item WFG 每个节点的出度最多为 1；
+  \item 图中存在有向环，当且仅当对应进程集合死锁；
+  \item 环检测可以用 DFS、颜色标记或分布式 probe 消息完成。
+\end{itemize}
+\vfill
+\callout{为什么简单}{一个进程只有一个等待方向，不存在“满足任一资源就能继续”的分支。}
+\end{frame}
+
+\begin{frame}{AND 模型}
+\begin{itemize}
+  \item 进程可以同时请求多个资源；
+  \item 必须所有资源都获得后才能继续；
+  \item WFG 出度可以大于 1；
+  \item 有向环是死锁的充分证据，但环外节点也可能因为依赖环而被阻塞；
+  \item 例如 P4 等待 P2，而 P2 被 P1/P3 环锁住，P4 也无法推进。
+\end{itemize}
+\end{frame}
+
+\begin{frame}{OR 模型与 AND-OR 模型}
+\begin{itemize}
+  \item OR：只要等待集合中任一进程释放资源即可继续；
+  \item OR 模型存在环不一定死锁，因为环外可能有另一条可行路径；
+  \item AND-OR：不同请求组分别表达“全部需要”或“任一即可”；
+  \item 判定通常从“闭锁集合”或 knot 出发，而不只是找一个简单环。
+\end{itemize}
+\vfill
+\callout{反例}{P1 等待 P2 或 P3；P2 等待 P1，虽然存在 P1$\leftrightarrow$P2 环，但 P3 一旦释放，P1 仍可继续。}
+\end{frame}
+
+\begin{frame}{检测算法的两个正确性要求}
+\begin{tabularx}{\linewidth}{>{\bfseries}p{2.8cm}X}
+\toprule
+Progress & 真正形成的死锁必须在有限时间内被检测，不应等额外事件“碰巧发生”。 \\
+Safety & 不能报告不存在的 phantom/false deadlock。 \\
+\bottomrule
+\end{tabularx}
+\vfill
+\begin{itemize}
+  \item 进度对应活性；安全对应不产生误报；
+  \item 分布式检测的难点是把不同时间观察到的边拼接成一个可行全局状态。
+\end{itemize}
+\end{frame}
+
+\sectionframe{三、WFG 的维护与分布式检测}{检测不仅是“找环”，还要决定哪些边已经生效、哪些边只是旧消息留下的影子。}
+
+\begin{frame}{为什么集中式 WFG 会过时？}
+\begin{enumerate}
+  \item P1 在 Site 1 等待 P2；
+  \item P2 在 Site 2 等待 P3；
+  \item P3 释放资源，P2 的边应该删除；
+  \item 检测者仍未收到删除消息，却收到 P1/P2 的旧等待边；
+  \item 如果把旧边和新边混在一起，可能拼出一个从未存在过的环。
+\end{enumerate}
+\end{frame}
+
+\begin{frame}{边的版本与因果顺序}
+\begin{itemize}
+  \item 每条等待边附带 generation/epoch 或 Lamport 时间戳；
+  \item 创建边、删除边都带版本，检测者忽略旧版本；
+  \item 删除消息不能简单覆盖新创建的同名边；
+  \item 若消息可能乱序，要通过序号、因果摘要或可靠重传重建边的生命周期。
+\end{itemize}
+\vfill
+\callout{连接前面章节}{消息序和逻辑时钟不是“只为理论服务”，它们直接决定 WFG 是否可解释。}
+\end{frame}
+
+\begin{frame}{Probe 消息的基本思路}
+\begin{itemize}
+  \item 阻塞进程沿等待边发送 probe；
+  \item probe 记录发起者、当前路径和代数；
+  \item 若 probe 回到发起者，说明存在候选环；
+  \item 接收者必须确认边仍然有效，否则返回 negative/obsolete；
+  \item 复杂系统中还需处理重复 probe、路径爆炸和故障节点。
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Chandy--Misra--Haas Probe：三进程完整过程}
+\small
+AND 模型中，$P_1$ 等待 $P_2$，$P_2$ 等待 $P_3$，$P_3$ 等待 $P_1$。
+\smallnote{$Probe(i,j,k)$ 表示：检测由 $P_i$ 发起，$P_j$ 把消息发送给 $P_k$。}
+\begin{center}
+\begin{tabularx}{.94\linewidth}{>{\bfseries}p{1.6cm}p{3.2cm}X}
+\toprule
+步骤 & Probe & 含义 \\
+\midrule
+1 & $(1,1,2)$ & 发起者 $P_1$ 告诉 $P_2$：“检测由 1 发起，消息从 1 来。” \\
+2 & $(1,2,3)$ & $P_2$ 仍阻塞，沿自己的等待边转发给 $P_3$。 \\
+3 & $(1,3,1)$ & $P_3$ 仍阻塞，沿等待边把 probe 发回 $P_1$。 \\
+4 & 返回发起者 & 第一字段仍是 1，说明等待依赖形成包含 $P_1$ 的环。 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+\callout{对照}{若 probe 到达一个 active、未阻塞的进程，传播停止；没有返回发起者就不能据此宣布死锁。}
+\end{frame}
+
+\begin{frame}{检测与恢复的闭环}
+\begin{center}
+\begin{tikzpicture}[node distance=9mm and 12mm,>=Latex]
+  \nodebox{ADSBlue}{observe}{观测等待边};
+  \nodebox[right=of observe]{ADSOrange}{detect}{检测环/knot};
+  \nodebox[right=of detect]{ADSGreen}{victim}{选择受害者};
+  \nodebox[right=of victim]{ADSDarkBlue}{recover}{回滚/释放};
+  \draw[\arrow,ADSGray] (observe)--(detect);
+  \draw[\arrow,ADSGray] (detect)--(victim);
+  \draw[\arrow,ADSGray] (victim)--(recover);
+  \draw[->,ADSGray] (recover.south) .. controls +(0,-1) and +(0,-1) .. node[below,font=\scriptsize]{重新观测}(observe.south);
+\end{tikzpicture}
+\end{center}
+\begin{itemize}
+  \item 解决死锁后要再次检测，确认恢复动作打破了所有依赖闭环；
+  \item 恢复过程本身也可能产生新等待。
+\end{itemize}
+\end{frame}
+
+\sectionframe{四、稳定全局谓词：为什么“两次观察”有用？}{稳定谓词一旦为真就不会再变假；因此可以把全局判断转成两次连续、可能不一致的观察。}
+
+\begin{frame}{全局谓词是什么？}
+\begin{itemize}
+  \item 谓词是对所有进程和信道状态的布尔判断；
+  \item 例子：$x_i+y_j+z_k<100$、系统已终止、某组进程形成死锁；
+  \item 快照记录的是一个一致切；谓词检测关注“某个执行中是否存在满足条件的状态”；
+  \item 不同观测可能经过不同全局状态，因此必须明确“可能”还是“必然”。
+\end{itemize}
+\end{frame}
+
+\begin{frame}{稳定谓词}
+若全局状态从切 $C$ 扩展到 $C'$，且
+\[
+C\models\varphi\Longrightarrow C'\models\varphi,
+\]
+则谓词 $\varphi$ 是稳定的。
+\begin{itemize}
+  \item 在没有取消、抢占、恢复或外部释放的封闭计算中，终止和死锁通常可建模为稳定性质；
+  \item 一旦检测到，就不需要担心它在未来“自己恢复为假”；
+  \item 非稳定性质如“队列长度超过阈值”可能瞬时出现又消失，处理更复杂。
+\end{itemize}
+\end{frame}
+
+\begin{frame}{两阶段观察法}
+\begin{enumerate}
+  \item 第一阶段记录所有用于定义谓词的局部变量和信道摘要；
+  \item 第一阶段完成后，再启动第二阶段记录；
+  \item 若两次观察之间以及两次观察内部，相关变量都没有变化；
+  \item 则在两次记录之间存在一个真实时刻，系统确实处于满足 $\varphi$ 的状态。
+\end{enumerate}
+\vfill
+\callout{核心直觉}{稳定性让“两个不一致快照都显示真”足以证明某个中间时刻也为真。}
+\end{frame}
+
+\begin{frame}{两阶段观察的时序}
+\begin{center}
+\begin{tikzpicture}[x=1cm,y=1cm,>=Latex]
+  \draw[->,ADSGray] (0,0)--(12,0) node[right]{时间};
+  \draw[ADSBlue,line width=1.6pt] (2,1)--(5,1) node[midway,above,font=\scriptsize]{phase 1};
+  \draw[ADSOrange,line width=1.6pt] (7,1)--(10,1) node[midway,above,font=\scriptsize]{phase 2};
+  \draw[dashed,ADSGray] (5,0)--(5,1.6);\draw[dashed,ADSGray] (7,0)--(7,1.6);
+  \node[font=\scriptsize,anchor=north] at (5,0){完成观察 1};
+  \node[font=\scriptsize,anchor=north] at (7,0){开始观察 2};
+\end{tikzpicture}
+\end{center}
+\begin{itemize}
+  \item 两阶段可以使用 ring、tree 或 flat-tree 传播控制消息；
+  \item 如果第二次观察发现变量变化，重新开始或报告“尚不能判定”。
+\end{itemize}
+\end{frame}
+
+\begin{frame}{全局谓词的两种模态}
+\begin{tabularx}{\linewidth}{>{\bfseries}p{2.8cm}X}
+\toprule
+Possibly($\varphi$) & 存在一个与执行一致的观察，其中某个全局状态满足 $\varphi$。 \\
+Definitely($\varphi$) & 对每一个一致观察，都存在一个全局状态满足 $\varphi$。 \\
+\bottomrule
+\end{tabularx}
+\vfill
+\begin{itemize}
+  \item “可能”适合告警和探索：是否存在一条可行执行路径；
+  \item “必然”更强，通常需要检查状态格中的所有相关路径；
+  \item 不能把一次监控采样直接当成 Definitely。
+\end{itemize}
+\end{frame}
+
+\begin{frame}{状态格（state lattice）}
+\begin{center}
+\begin{tikzpicture}[x=1cm,y=0.75cm,>=Latex]
+  \foreach \i in {0,...,5}{\foreach \j in {0,...,5}{\fill[ADSBlue!50] (\i,\j) circle (1.1pt);}}
+  \foreach \i in {0,...,4}{\foreach \j in {0,...,5}{\draw[ADSGray!60] (\i,\j)--(\i+1,\j);}}
+  \foreach \i in {0,...,5}{\foreach \j in {0,...,4}{\draw[ADSGray!60] (\i,\j)--(\i,\j+1);}}
+  \draw[very thick,ADSOrange] (0,5)--(1,5)--(1,4)--(2,4)--(2,3)--(3,3)--(3,2)--(4,2)--(4,1)--(5,1);
+  \node[below=5mm of {$(2.5,0)$},font=\scriptsize\color{ADSGray}]{每个点表示各进程事件前缀的组合};
+\end{tikzpicture}
+\end{center}
+\begin{itemize}
+  \item 一条从初始到最终状态的单调路径代表一种一致事件交错；
+  \item 在状态格中寻找满足谓词的点，可以回答 Possibly；
+  \item 检查所有路径是否必经某区域，可以回答 Definitely。
+\end{itemize}
+\end{frame}
+
+\sectionframe{五、把死锁看成稳定全局谓词}{WFG 的死锁条件可以被嵌入稳定谓词框架，统一检测、证明和恢复。}
+
+\begin{frame}{死锁的局部与全局条件}
+\begin{itemize}
+  \item 局部条件：候选集合中的每个进程都处于 blocked；
+  \item 全局条件：这些进程只能等待候选集合内部的回复/资源释放；
+  \item 如果候选集合之外仍有一条可行回复路径，不能宣布死锁；
+  \item 这解释了为什么 OR/AND-OR 模型需要 knot，而不是简单环。
+\end{itemize}
+\end{frame}
+
+\begin{frame}{检测反例：幻影死锁}
+\begin{enumerate}
+  \item 检测器先看到 P1 等待 P2；
+  \item 随后看到 P2 等待 P3；
+  \item P3 在真实执行中已经释放资源，但释放消息尚未到达；
+  \item 检测器把旧边拼成 P1$\rightarrow$P2$\rightarrow$P3$\rightarrow$P1；
+  \item 这条环从未在一个真实一致切上同时存在，是 phantom deadlock。
+\end{enumerate}
+\vfill
+\callout{修复}{为边携带序号、使用一致快照，或采用两阶段稳定谓词观察。}
+\end{frame}
+
+\begin{frame}{死锁恢复：怎样选受害者？}
+\begin{itemize}
+  \item 回滚成本：已完成的计算、重做时间、Checkpoint 大小；
+  \item 资源释放收益：打破多少等待边、唤醒多少进程；
+  \item 业务优先级：在线请求通常优先于离线作业；
+  \item 公平性：不能长期选择同一个租户或同一类作业；
+  \item 安全性：回滚点必须是一致状态，不能产生重复提交。
+\end{itemize}
+\end{frame}
+
+\sectionframe{六、AI 基础设施中的等待图与全局谓词}{GPU、网络、存储和控制面对象共同形成新的等待关系。}
+
+\begin{frame}{GPU 训练作业的 WFG}
+\begin{center}
+\begin{tikzpicture}[>=Latex,node distance=10mm and 16mm]
+  \nodebox{ADSBlue}{tr1}{训练作业 A};
+  \nodebox[right=of tr1]{ADSOrange}{gpu}{GPU 节点};
+  \nodebox[below=of gpu]{ADSGreen}{net}{RDMA/NCCL 网络};
+  \nodebox[below=of tr1]{ADSDarkBlue}{tr2}{训练作业 B};
+  \draw[\arrow,ADSGray] (tr1)--node[above,font=\scriptsize]{等待 GPU}(gpu);
+  \draw[\arrow,ADSGray] (gpu)--node[right,font=\scriptsize]{等待释放}(tr2);
+  \draw[\arrow,ADSGray] (tr2)--node[below,font=\scriptsize]{等待网络}(net);
+  \draw[\arrow,ADSGray] (net)--node[left,font=\scriptsize]{等待 A 完成}(tr1);
+\end{tikzpicture}
+\end{center}
+\begin{itemize}
+  \item gang scheduling 可能让一个作业持有部分 GPU、等待剩余 GPU；
+  \item 通信拓扑、Checkpoint I/O 和节点驱逐都会形成跨资源等待边。
+\end{itemize}
+\end{frame}
+
+\begin{frame}{AI 平台中的稳定谓词}
+\begin{itemize}
+  \item “训练作业已经安全完成”：所有 worker 完成、梯度通信清空、Checkpoint 持久化；
+  \item “模型发布已经可回滚”：新版本 Ready、旧版本请求排空、路由版本写入控制面；
+  \item “集群进入保护状态”：GPU 配额耗尽、队列持续超时、故障域失联；
+  \item 这些谓词需要同时观察进程、网络、存储和控制面变量。
+\end{itemize}
+\end{frame}
+
+\begin{frame}{课堂互动：检测一个 AI 死锁}
+\begin{enumerate}
+  \item 作业 A 持有 2 张 GPU，等待另外 2 张；
+  \item 作业 B 持有网络带宽配额，等待 A 释放 GPU；
+  \item 节点控制器等待 B 完成后才能回收带宽；
+  \item 讨论：这是 AND 还是 AND-OR 模型？哪条边是资源分配，哪条边是控制面依赖？
+\end{enumerate}
+\vfill
+\callout{答案要求}{画出 WFG，指出候选死锁集合，并说明需要哪些版本/epoch 信息避免幻影死锁。}
+\end{frame}
+
+\begin{frame}{综合比较：快照、WFG、两阶段观察}
+\begin{tabularx}{\linewidth}{>{\bfseries}p{2.8cm}XXX}
+\toprule
+方法 & 适合问题 & 证据 & 主要代价 \\
+全局快照 & 终止、资源状态 & 一致切上的完整状态 & 收集开销大 \\
+WFG 探测 & 环、等待依赖 & 路径/边的因果证据 & 需防旧边和重复 probe \\
+两阶段稳定检测 & 稳定全局谓词 & 两次观察间无变化 & 对非稳定谓词不够 \\
+\bottomrule
+\end{tabularx}
+\end{frame}
+
+\sectionframe{七、死锁检测完整推演}{从局部等待边开始，构造全局 WFG，再判断环是否真实。}
+
+\begin{frame}{完整例子：三资源环}
+\begin{center}
+\begin{tikzpicture}[>=Latex,node distance=12mm and 18mm]
+\nodebox[minimum width=2.2cm]{ADSBlue}{p11}{P1};
+\nodebox[right=of p11,minimum width=2.2cm]{ADSOrange}{r11}{资源 R1};
+\nodebox[below=of r11,minimum width=2.2cm]{ADSGreen}{p21}{P2};
+\nodebox[left=of p21,minimum width=2.2cm]{ADSGray}{r21}{资源 R2};
+\draw[\arrow,ADSGray] (p11)--node[above,font=\scriptsize]{等待}(r11);
+\draw[\arrow,ADSGray] (r11)--node[right,font=\scriptsize]{持有}(p21);
+\draw[\arrow,ADSGray] (p21)--node[below,font=\scriptsize]{等待}(r21);
+\draw[\arrow,ADSGray] (r21)--node[left,font=\scriptsize]{持有}(p11);
+\end{tikzpicture}
+\end{center}
+\begin{itemize}
+  \item P1 和 P2 都在等待对方释放资源；
+  \item WFG 中出现 P1 $\rightarrow$ P2 $\rightarrow$ P1 的环；
+  \item 在单实例 AND 模型中，环足以证明死锁候选。
+\end{itemize}
+\end{frame}
+
+\begin{frame}{幻影死锁：旧边如何制造假环？}
+\begin{enumerate}
+  \item P1 发送“等待 P2”的边；
+  \item P2 很快释放资源，但删除消息延迟；
+  \item P2 又产生“等待 P1”的新边；
+  \item 探测器把旧边和新边拼在一起，看到不存在的环；
+  \item 解决方法：边带 epoch/version，删除必须覆盖对应版本。
+\end{enumerate}
+\end{frame}
+
+\begin{frame}{边版本协议}
+\scriptsize
+\begin{tabularx}{\linewidth}{>{\bfseries}p{3cm}XX}
+\toprule
+事件 & 边记录 & 接收方动作 \\
+Add(P1,P2,e=7) & 等待边版本 7 & 若本地版本小于 7，安装 \\
+Remove(P1,P2,e=7) & 删除版本 7 & 只删除当前仍为 7 的边 \\
+Add(P1,P2,e=8) & 新等待边 & 拒绝任何版本小于 8 的删除 \\
+\bottomrule
+\end{tabularx}
+\normalsize
+\vfill
+\end{frame}
+
+\begin{frame}{AND、OR 与 AND-OR 的差别}
+\begin{itemize}
+  \item AND：作业需要所有资源，环通常意味着闭锁；
+  \item OR：作业只需任一资源，环中的一个可替代分支可能让系统继续；
+  \item AND-OR：既有必需资源，也有可选资源，需要判断 knot/闭锁集合；
+  \item 把 OR 模型误当 AND 会误杀可继续推进的作业。
+\end{itemize}
+\end{frame}
+
+\begin{frame}{全局谓词：Possibly 与 Definitely}
+设谓词 $P$ 在一个一致 cut 上成立：
+\begin{itemize}
+  \item Possibly P：存在某个与当前信息一致的全局状态满足 P；
+  \item Definitely P：所有可能的全局状态都满足 P；
+  \item 死锁检测通常需要强证据，不能把“可能死锁”直接当成处置依据；
+  \item 两阶段观察、快照和因果消息用于缩小可能状态集合。
+\end{itemize}
+\end{frame}
+
+\begin{frame}{状态格例子：$a+b=10$}
+\begin{center}
+\begin{tikzpicture}[>=Latex,x=0.43cm,y=0.43cm]
+\draw[ADSGray,->] (0,0)--(10.8,0) node[right,font=\scriptsize]{$a$};
+\draw[ADSGray,->] (0,0)--(0,10.8) node[above,font=\scriptsize]{$b$};
+\draw[ADSBlue,very thick] (0,10)--(10,0);
+\foreach \x in {0,2,4,6,8,10}{\fill[ADSOrange] (\x,10-\x) circle (2pt);}
+\node[font=\scriptsize,anchor=west] at (1,9){满足 $a+b=10$ 的状态边界};
+\end{tikzpicture}
+\end{center}
+\vspace{-5mm}
+\begin{itemize}
+  \item 一个局部观察可能对应格子中的多个候选点；
+  \item 若所有候选点都在边界上，才能说 Definitely P；
+  \item 若至少一个候选点在边界上，只能说 Possibly P。
+\end{itemize}
+\end{frame}
+
+\begin{frame}{AI 集群中的资源等待}
+\begin{enumerate}
+  \item 训练作业 A 持有 2 张 GPU，等待另外 2 张；
+  \item 作业 B 持有 RDMA 配额，等待 A 释放 GPU；
+  \item 控制器等待 B 完成后才回收带宽；
+  \item 数据存储等待控制器释放 checkpoint 锁；
+  \item 形成跨 GPU、网络、控制器和存储的闭环。
+\end{enumerate}
+\end{frame}
+
+\begin{frame}{死锁恢复策略比较}
+\begin{tabularx}{\linewidth}{>{\bfseries}p{2.8cm}XX}
+\toprule
+抢占 & 收回资源，让一个作业先完成。 & 可能丢失 GPU 状态，需 checkpoint。 \\
+回滚 & 将作业恢复到一致点后重试。 & 需要保存状态，可能产生重复计算。 \\
+杀死作业 & 直接打破环。 & 影响最大，但实现简单。 \\
+重新排队 & 改变调度顺序，避免再次形成环。 & 不一定能处理已经持有的资源。 \\
+\bottomrule
+\end{tabularx}
+\end{frame}
+
+\begin{frame}{课堂推演：发现环之后谁先让步？}
+\begin{itemize}
+  \item 候选作业：优先级、已消耗 GPU 时间、checkpoint 成本不同；
+  \item 选择牺牲者不能只看 PID；
+  \item 可用代价函数：\(\text{lost work}+\text{restart cost}+\text{SLA penalty}\)；
+  \item 处置动作必须写入控制日志，避免不同控制器重复抢占。
+\end{itemize}
+\end{frame}
+
+\begin{frame}{本讲总结}
+\begin{enumerate}
+  \item WFG 把“等待资源”变成可计算的依赖图；
+  \item 单资源/AND 模型可用环推理，OR/AND-OR 需要更强的闭锁集合；
+  \item 检测必须同时满足 progress 和 safety，特别防止 phantom deadlock；
+  \item 稳定谓词允许用两阶段观察证明“某个真实时刻一定成立”；
+  \item AI 集群中的 GPU、网络、Checkpoint 和控制器依赖同样可以建模为等待图。
+\end{enumerate}
+\vfill
+\callout{下一讲衔接}{如果系统已经出现故障，如何通过 Checkpoint 和 Rollback 回到一致状态？}
+\end{frame}
+
+\begin{frame}{课后题}
+\begin{enumerate}
+  \item 给出 AND 模型中“环外进程也死锁”的例子；
+  \item 设计一个带边版本号的 WFG 更新协议，处理乱序删除；
+  \item 对 $a+b=10$ 的状态格，区分 Possibly 与 Definitely 的判定；
+  \item 设计一个 AI 训练作业死锁恢复策略，比较回滚、抢占和重新排队。
+\end{enumerate}
+\end{frame}
+
+\begin{frame}{死锁判据的适用边界}
+\small
+\begin{itemize}
+  \item 在单资源或 AND 模型中，有向环可以作为死锁证据；在 OR/AND-OR 模型中，环外的可行替代路径可能解除等待，不能直接套用“有环即死锁”。
+  \item CMH 类 probe 算法的教学基线通常假设可靠信道、稳定的 wait-for 边和不发生并发删除；真实系统要用边版本、epoch 或快照一致性处理幻影死锁。
+  \item “死锁是稳定全局谓词”只适用于封闭计算：没有取消、抢占、超时释放、恢复或外部资源注入；一旦这些动作存在，谓词可能自行消失。
+  \item 检测到候选环后还要选择受害者、回收资源并再次验证，不能把一条过期 probe 返回直接当成终止处置依据。
+\end{itemize}
+\vfill
+\callout{课堂追问}{一个环说明“当前观察可能闭锁”；要宣布真实死锁，还必须说明模型中没有可行的外部解除路径。}
+\end{frame}
+
+\end{document}

@@ -1,0 +1,510 @@
+\documentclass[UTF8,fontset=none,aspectratio=169,10pt]{beamer}
+\usepackage{ads-beamer-theme}
+\title{高级分布式系统}
+\subtitle{第十讲：分布式互斥算法}
+\author{陈鹏飞\quad 计算机学院}
+\institute{中山大学}
+\date{2025--2026 学年}
+
+\begin{document}
+\begin{frame}[plain]
+\begin{tikzpicture}[remember picture,overlay]
+  \fill[ADSBlue] (current page.north west) rectangle ([xshift=2.4cm]current page.south west);
+  \fill[ADSOrange] ([xshift=2.4cm]current page.north west) rectangle ([xshift=2.55cm]current page.south west);
+  \node[anchor=west,align=left] at ([xshift=3.3cm,yshift=1.0cm]current page.west) {\fontsize{32}{38}\selectfont\color{ADSBlue}\bfseries 高级分布式系统};
+  \node[anchor=west,align=left] at ([xshift=3.3cm,yshift=-0.4cm]current page.west) {\fontsize{21}{27}\selectfont\color{ADSDarkBlue}第十讲\quad 分布式互斥算法};
+  \node[anchor=west,align=left] at ([xshift=3.3cm,yshift=-2.2cm]current page.west) {\large\color{ADSGray}没有共享内存，如何决定谁能进入临界区？};
+  \node[anchor=east] at ([xshift=-0.8cm,yshift=-3.2cm]current page.east) {\small\color{ADSGray}陈鹏飞\quad 中山大学\quad 2025--2026};
+  \draw[ADSBlue,line width=0.8pt] ([xshift=3.3cm,yshift=-1.35cm]current page.west) -- ([xshift=12.6cm,yshift=-1.35cm]current page.west);
+\end{tikzpicture}
+\end{frame}
+
+\sectionframe{一、从共享变量到消息协议}{分布式互斥的难点不是“写一个锁”，而是在延迟不可预测、状态不完整的网络中维持唯一进入权。}
+
+\begin{frame}{本讲学习目标}
+\begin{enumerate}
+  \item 形式化互斥的安全性、活性和公平性；
+  \item 比较 token、非 token 和 quorum 三条路线；
+  \item 推导 Lamport、Ricart--Agrawala、Maekawa、Suzuki--Kasami 和 Raymond 算法；
+  \item 解释消息复杂度、同步延迟、响应时间和吞吐量；
+  \item 把临界区映射到分布式数据库、GPU 资源和模型发布。
+\end{enumerate}
+\vfill
+\callout{主线}{所有算法都在回答同一个问题：当前唯一的“进入权”在哪里，怎样可靠地转移给下一个请求者？}
+\end{frame}
+
+\begin{frame}{临界区与三条性质}
+\begin{tabularx}{\linewidth}{>{\bfseries}p{2.8cm}X}
+\toprule
+安全性 & 任意时刻至多一个进程执行临界区。 \\
+活性 & 请求不会永久等待，系统不因互相等待而死锁。 \\
+公平性 & 请求按某种全局可解释的顺序获得机会，避免饥饿。 \\
+\bottomrule
+\end{tabularx}
+\vfill
+\callout{不能只看安全}{一个永远不发 token 的算法满足“至多一个”，但不满足活性；一个让快进请求无限插队的算法可能不公平。}
+\end{frame}
+
+\begin{frame}{三类算法路线}
+\begin{columns}[T]
+\column{.31\linewidth}\blocktitle{Token-based}\begin{itemize}\item 唯一 token；\item 持有 token 才能进入；\item 安全性直观。\end{itemize}
+\column{.31\linewidth}\blocktitle{Non-token}\begin{itemize}\item 请求/回复多轮消息；\item 用逻辑时间排序；\item 不维护实体 token。\end{itemize}
+\column{.31\linewidth}\blocktitle{Quorum-based}\begin{itemize}\item 只向一个 quorum 请求；\item 任意两个 quorum 相交；\item 降低消息数量。\end{itemize}
+\end{columns}
+\vfill
+\callout{选择依据}{系统规模、负载、拓扑、故障模型和是否容易维护唯一 token，决定算法路线。}
+\end{frame}
+
+\begin{frame}{性能指标：算法优劣不只看消息数}
+\begin{itemize}
+  \item 消息复杂度：每次临界区执行额外发送多少消息；
+  \item 同步延迟：上一个进程退出到下一个进程进入之间的等待；
+  \item 响应时间：请求发出到进入临界区的总时间；
+  \item 吞吐量：单位时间完成多少次临界区执行；
+  \item 低负载与高负载下，最优算法可能不同。
+\end{itemize}
+\vfill
+\[
+\text{throughput}\approx\frac{1}{\text{synchronization delay}+E}
+\]
+\end{frame}
+
+\sectionframe{二、Lamport：用全序请求排序}{每个请求都带逻辑时间戳；当所有人都看到更晚的请求后，最早请求才能进入。}
+
+\begin{frame}{Lamport 算法的数据结构}
+\begin{itemize}
+  \item 每个站点维护 request queue，按 $(timestamp, siteID)$ 排序；
+  \item 请求者广播 REQUEST(ts,i)，并把自己的请求放入本地队列；
+  \item 收到请求的站点把它插入队列并回复；
+  \item 退出临界区后广播 RELEASE，让其他站点删除这条请求。
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Lamport 的进入条件}
+站点 $S_i$ 的请求 $(ts_i,i)$ 满足以下条件后才能进入：
+\begin{enumerate}
+  \item L1：已经从所有其他站点收到时间戳大于 $(ts_i,i)$ 的消息；
+  \item L2：自己的请求位于本地 request queue 队首。
+\end{enumerate}
+\vfill
+\begin{itemize}
+  \item L1 让所有潜在更早请求有机会到达；
+  \item L2 让本地队列按全序选择最早请求。
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Lamport 的正确性直觉}
+\begin{enumerate}
+  \item 反设 $S_i,S_j$ 同时进入临界区；
+  \item 不妨设 $(ts_i,i)<(ts_j,j)$；
+  \item 当 $S_j$ 满足 L1 时，$S_i$ 的更早请求已经进入 $S_j$ 的队列；
+  \item 那么 $S_j$ 的请求不可能仍在自己队首，和 L2 矛盾。
+\end{enumerate}
+\end{frame}
+
+\begin{frame}{Lamport 的复杂度与假设}
+\begin{itemize}
+  \item REQUEST：$N-1$；REPLY：$N-1$；RELEASE：$N-1$；
+  \item 每次临界区执行共 $3(N-1)$ 条消息；
+  \item 依赖 FIFO 信道和可靠通信；
+  \item 可以在某些情况下省略 REPLY，降到约 $2(N-1)$ 到 $3(N-1)$；
+  \item 全广播结构简单，但规模大时控制流量昂贵。
+\end{itemize}
+\end{frame}
+
+\sectionframe{三、Ricart--Agrawala：把回复变成许可}{不再广播 RELEASE；收到请求后立即回复或延迟回复，临界区退出时释放所有延迟许可。}
+
+\begin{frame}{Ricart--Agrawala 的规则}
+\begin{enumerate}
+  \item 请求者广播带时间戳的 REQUEST；
+  \item 收到请求的站点：若自己不请求/不执行，立即 REPLY；
+  \item 若自己也请求，比较时间戳：优先级更高者保留许可，另一方延迟；
+  \item 请求者收到所有其他站点的 REPLY 后进入；
+  \item 退出临界区时发送所有延迟的 REPLY。
+\end{enumerate}
+\end{frame}
+
+\begin{frame}{为什么延迟回复能保证互斥？}
+\begin{itemize}
+  \item 若 $S_i$ 的请求优先级高于 $S_j$，$S_i$ 不会在离开临界区前回复 $S_j$；
+  \item 因此 $S_j$ 无法收齐所有许可；
+  \item 两个请求不可能同时得到全部许可；
+  \item REQUEST + REPLY 共 $2(N-1)$ 条消息，少于 Lamport。
+\end{itemize}
+\vfill
+\callout{代价}{没有 token 就没有“实体转移”问题，但每次请求仍需全体站点参与，且站点故障会阻塞。}
+\end{frame}
+
+\begin{frame}{公平性与逻辑时间}
+\begin{itemize}
+  \item Lamport 时钟只提供偏序扩展成的全序；
+  \item 相同物理时间到达的请求用站点 ID 打破平局；
+  \item 站点必须在收到消息后更新逻辑时钟；
+  \item 公平性来自统一的请求优先级，而不是消息先到先服务。
+\end{itemize}
+\end{frame}
+
+\sectionframe{四、Quorum：用相交集合替代全广播}{只向一个 quorum 请求许可，只要任意两个 quorum 相交，就能让共享成员仲裁冲突。}
+
+\begin{frame}{Coterie 与 Quorum}
+\begin{itemize}
+  \item Coterie 是一组 quorums 的集合；
+  \item Intersection：任意两个 quorum 都有公共站点；
+  \item Minimality：没有一个 quorum 是另一个 quorum 的超集；
+  \item 交集保证安全性，最小性主要改善效率。
+\end{itemize}
+\begin{center}
+\begin{tikzpicture}[node distance=9mm and 13mm,>=Latex]
+  \nodebox[minimum width=3.0cm]{ADSBlue}{q1}{Q1={1,2,3}};
+  \nodebox[right=of q1,minimum width=3.0cm]{ADSOrange}{q2}{Q2={2,4,5}};
+  \nodebox[right=of q2,minimum width=3.0cm]{ADSGreen}{q3}{Q3={1,4,6}};
+  \node[below=5mm of q2,font=\scriptsize\color{ADSGray}]{任意两组有交集};
+\end{tikzpicture}
+\end{center}
+\end{frame}
+
+\begin{frame}{Maekawa 算法的请求流程}
+\begin{enumerate}
+  \item 站点 $S_i$ 向自己的 request set $R_i$ 发送 REQUEST；
+  \item quorum 中的站点一次只向一个请求发送 REPLY；其他请求进入队列；
+  \item $S_i$ 收齐 $R_i$ 中所有 REPLY 后进入临界区；
+  \item 退出后向 $R_i$ 发送 RELEASE，释放队列中的下一个请求。
+\end{enumerate}
+\vfill
+\callout{安全性来源}{若两个站点同时进入，它们的 quorum 交集中的站点必须同时给出两份许可，矛盾。}
+\end{frame}
+
+\begin{frame}{Maekawa 的复杂度与死锁}
+\begin{itemize}
+  \item 典型 request set 大小约为 $\sqrt{N}$；
+  \item 一次执行约 $3\sqrt{N}$ 条消息；
+  \item 但不同站点可能互相持有交集锁，形成环形等待；
+  \item 需要 FAILED、INQUIRE、YIELD 等额外消息打破死锁；
+  \item 复杂度与安全性之间存在清晰的权衡。
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Quorum 算法的图论解释}
+\begin{center}
+\begin{tikzpicture}[>=Latex]
+  \nodebox{ADSBlue}{s1}{请求者 A};
+  \nodebox[right=of s1,minimum width=2.2cm]{ADSOrange}{x}{交集站点};
+  \nodebox[right=of x,minimum width=2.2cm]{ADSGreen}{s2}{请求者 B};
+  \draw[\arrow,ADSGray] (s1)--node[above,font=\scriptsize]{Q\_A 许可}(x);
+  \draw[\arrow,ADSGray] (s2)--node[above,font=\scriptsize]{Q\_B 许可}(x);
+  \node[below=7mm of x,font=\scriptsize\color{ADSGray}]{x 一次只能把许可给一个请求};
+\end{tikzpicture}
+\end{center}
+\begin{itemize}
+  \item quorum 设计本质上是在构造“任意两条访问路径必相交”的仲裁结构；
+  \item 这与复制系统中的读写 quorum、共识中的多数派有相同的几何直觉。
+\end{itemize}
+\end{frame}
+
+\sectionframe{五、Token 算法：把唯一进入权显式化}{Token 的好处是安全性直观，难点是 token 丢失、重复、过期和路径效率。}
+
+\begin{frame}{唯一 token 的安全性}
+\begin{itemize}
+  \item 系统中最多存在一个有效 token；
+  \item 持有 token 的站点才可进入临界区；
+  \item 退出时 token 被传给下一个请求者，或留在当前站点；
+  \item 只要 token 不丢、不复制、不被错误判旧，互斥立即成立。
+\end{itemize}
+\vfill
+\callout{故障问题}{token 算法把“全体同意”换成“维护唯一权”；在进程崩溃和网络分区下，恢复 token 本身需要共识或故障检测。}
+\end{frame}
+
+\begin{frame}{Suzuki--Kasami：广播请求 + token 队列}
+\begin{itemize}
+  \item 请求者若没有 token，广播 REQUEST$(j,n)$；
+  \item $n$ 是站点 $j$ 的第 $n$ 次请求序号，用于过滤旧消息；
+  \item token 包含请求队列 $Q$ 和 $LN[j]$，记录每个站点最近执行到的序号；
+  \item token 按队列传给尚未执行的请求者。
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Suzuki--Kasami 的状态关系}
+\begin{itemize}
+  \item 以下记号假设每个站点同一时刻至多有一个未完成请求；若允许多个并发请求，必须维护请求序列区间/队列，而不能只检查一个 $LN[j]+1$；
+  \item 若 $RN_i[j]=LN[j]+1$，说明站点 $j$ 有一个尚未服务的请求；
+  \item 站点执行临界区后更新 $LN[i]:=RN_i[i]$；
+  \item 再把新发现的请求按顺序加入 token 队列；
+  \item 若本地已经持有 idle token，可零消息进入临界区；否则请求广播需要 $N$ 条消息。
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Suzuki--Kasami 的正确性与性能}
+\begin{itemize}
+  \item 只有 token 持有者进入，安全性来自唯一 token；
+  \item 请求消息最终到达持 token 的站点，站点最终把请求放入队列；
+  \item 队列前最多有 $N-1$ 个请求，因此不会无限等待；
+  \item 低负载时本地 token 极快；高负载时广播成本明显。
+\end{itemize}
+\end{frame}
+
+\sectionframe{六、Raymond：把 token 传输限制在树路径上}{用逻辑指针把 token 的位置组织成树，节点只和邻居通信。}
+
+\begin{frame}{Raymond 算法的结构}
+\begin{itemize}
+  \item 网络被组织成一棵逻辑树；
+  \item 每个节点维护 HOLDER，指向自己认为 token 所在的邻居或自己；
+  \item REQUEST 沿 HOLDER 指针向 token 方向传播；
+  \item PRIVILEGE 沿请求路径反向传递；
+  \item 节点只需知道邻居，不需全局成员列表。
+\end{itemize}
+\begin{center}
+\begin{tikzpicture}[>=Latex]
+  \nodebox{ADSBlue}{a10}{A}; \nodebox[right=of a10]{ADSBlue}{b10}{B}; \nodebox[right=of b10]{ADSBlue}{c10}{C}; \nodebox[right=of c10]{ADSGreen}{g10}{G*};
+  \draw[->,ADSGray] (a10)--(b10); \draw[->,ADSGray] (b10)--(c10); \draw[->,ADSGray] (c10)--(g10);
+  \node[below=4mm of g10,font=\scriptsize\color{ADSGray}]{* 当前持有 token};
+\end{tikzpicture}
+\end{center}
+\end{frame}
+
+\begin{frame}{Raymond 的请求/特权流程}
+\begin{enumerate}
+  \item B 想进入，发现 HOLDER[B]=C，向 C 发 REQUEST；
+  \item C 沿 HOLDER 指针把请求转发到 G；
+  \item G 结束当前临界区后向 C 发送 PRIVILEGE；
+  \item C 取出请求队列中的 B，把 PRIVILEGE 转给 B；
+  \item 每个节点更新 HOLDER 和本地 FIFO 请求队列。
+\end{enumerate}
+\end{frame}
+
+\begin{frame}{Raymond 的状态变量}
+\begin{tabularx}{\linewidth}{>{\bfseries}p{2.7cm}X}
+\toprule
+HOLDER & token 相对当前位置的方向；若自己持有则为 self。 \\
+USING & 当前节点是否正在执行临界区。 \\
+REQUEST Q & 邻居或 self 的请求 FIFO 队列。 \\
+ASKED & 是否已经向 HOLDER 邻居发送过请求，防止重复请求。 \\
+\bottomrule
+\end{tabularx}
+\vfill
+\callout{局部性}{每个节点只维护邻居关系，因此消息复杂度与树上距离相关，而不是与全网节点数线性相关。}
+\end{frame}
+
+\begin{frame}{树算法的消息复杂度}
+\begin{itemize}
+  \item 请求从节点到 token 的路径长度为 $d$；
+  \item 特权返回路径长度也约为 $d$；
+  \item 一次临界区执行的消息数量约为 $O(d)$；
+  \item 平衡树让平均距离接近 $O(\log N)$，但热点请求会集中在靠近 token 的路径；
+  \item 重新构造树可以改善负载，但会引入额外控制成本。
+\end{itemize}
+\end{frame}
+
+\sectionframe{七、从临界区到 AI 资源控制}{临界区可以代表锁、分片租约、GPU 配额、模型发布窗口或一次性的迁移权。}
+
+\begin{frame}{数据库中的分布式互斥}
+\begin{itemize}
+  \item 对同一分片的 schema 变更、主节点切换或 compaction 需要互斥；
+  \item token 可以表示“当前 leader 的维护权”；
+  \item quorum 可以表示“本次操作获得足够副本许可”；
+  \item 非 token 算法适合没有长期中心、但需要全局顺序的元数据操作。
+\end{itemize}
+\end{frame}
+
+\begin{frame}{GPU 资源作为临界区}
+\begin{itemize}
+  \item 一张独占 GPU、一个 NVLink 域或一个 MIG 分区可以看成临界资源；
+  \item 请求者携带租约时间、优先级和工作量估计；
+  \item 互斥保证不会同时把同一独占设备分配给两个作业；
+  \item 公平性决定短作业是否被长训练作业饿死；
+  \item 实际调度还需考虑 gang scheduling 和拓扑约束。
+\end{itemize}
+\end{frame}
+
+\begin{frame}{模型发布的互斥窗口}
+\begin{enumerate}
+  \item 发布系统拿到“生产切换权”；
+  \item 旧版本逐步排空请求，新版本完成健康检查；
+  \item 只有一个控制器能修改主路由或模型别名；
+  \item 结束后释放租约，允许下一次发布；
+  \item 若控制器故障，租约过期或共识日志保证不会永久锁死。
+\end{enumerate}
+\end{frame}
+
+\begin{frame}{课堂互动：选择哪一类算法？}
+\begin{tabularx}{\linewidth}{>{\bfseries}p{3.2cm}XX}
+\toprule
+场景 & 推荐起点 & 主要理由 \\
+全网请求少、实现简单 & Lamport / Ricart--Agrawala & 易证明、全序清晰 \\
+持续高负载、固定拓扑 & Raymond / Suzuki--Kasami & 复用 token，降低广播 \\
+多副本仲裁、规模大 & Quorum & 用交集替代全体参与 \\
+动态负载明显不均 & 自适应信息结构 & 让高频站点更近、减少无效许可 \\
+\bottomrule
+\end{tabularx}
+\end{frame}
+
+\begin{frame}{课堂推演：Lamport 三进程时序}
+\begin{enumerate}
+  \item P1 产生 REQUEST(5,1)，P2 产生 REQUEST(4,2)，P3 稍后产生 REQUEST(7,3)；
+  \item 让学生在每个进程的 request queue 中插入三条请求；
+  \item 判断谁先进入、谁需要等待 RELEASE；
+  \item 插入一条延迟 REPLY，观察同步延迟和响应时间如何变化。
+\end{enumerate}
+\end{frame}
+
+\begin{frame}{课堂推演：Maekawa 的死锁环}
+\begin{center}
+\begin{tikzpicture}[node distance=12mm and 14mm,>=Latex]
+  \nodebox{ADSBlue}{ma}{A}; \nodebox[right=of ma]{ADSOrange}{mb}{B}; \nodebox[right=of mb]{ADSGreen}{mc}{C};
+  \draw[\arrow,ADSGray] (ma)--node[above,font=\scriptsize]{等待交集}(mb);
+  \draw[\arrow,ADSGray] (mb)--node[above,font=\scriptsize]{等待交集}(mc);
+  \draw[\arrow,ADSGray] (mc) .. controls +(0,-1) and +(0,-1) .. node[below,font=\scriptsize]{等待交集}(ma);
+\end{tikzpicture}
+\end{center}
+\begin{itemize}
+  \item 三个请求各自拿到一个交集站点，互相等待另一个许可；
+  \item 要求学生指出哪条边应该通过 FAILED/INQUIRE/YIELD 解除。
+\end{itemize}
+\end{frame}
+
+\sectionframe{七、互斥算法完整推演}{把 REQUEST、许可、进入、退出和故障恢复放到同一条时间线上。}
+
+\begin{frame}{Lamport 互斥：三进程完整例子}
+\begin{enumerate}
+  \item P1 发送 REQUEST$(5,1)$，P2 发送 REQUEST$(4,2)$；
+  \item P1、P2 互相回复 REPLY，并把对方请求放入本地队列；
+  \item P2 的时间戳更小，先收到所有许可并进入临界区；
+  \item P2 退出后发送 RELEASE，P1 才能从队首进入；
+  \item 全序来自时间戳+PID，而不是消息物理到达顺序。
+\end{enumerate}
+\end{frame}
+
+\begin{frame}{Lamport 请求队列的状态}
+\begin{tabularx}{\linewidth}{>{\bfseries}p{2.2cm}XXX}
+\toprule
+时刻 & P1 队列 & P2 队列 & 可进入者 \\
+t1 & (5,1) & (4,2) & 无，等待 REPLY \\
+t2 & (4,2),(5,1) & (4,2),(5,1) & P2 \\
+t3 & (5,1) & (5,1) & P1（收到 RELEASE 后） \\
+\bottomrule
+\end{tabularx}
+\vfill
+\callout{课堂检查}{如果 P1 的 REPLY 延迟，P2 能否提前进入？如果 P2 的 RELEASE 丢失，谁负责恢复？}
+\end{frame}
+
+\begin{frame}{Ricart--Agrawala：为什么少一类消息？}
+\begin{itemize}
+  \item Lamport 需要 REQUEST、REPLY、RELEASE 三类广播；
+  \item Ricart--Agrawala 把 RELEASE 隐含在“延迟回复”中；
+  \item 请求者收到所有其他进程的 REPLY 才能进入；
+  \item 退出时向延迟请求者发送回复；
+  \item 消息数从约 $3(n-1)$ 降到 $2(n-1)$，但故障恢复更敏感。
+\end{itemize}
+\end{frame}
+
+\begin{frame}{延迟回复的本地规则}
+收到请求 $R_j$ 时，进程 P 的判断：
+\begin{enumerate}
+  \item 若 P 不在临界区，也没有更早的本地请求，立即 REPLY；
+  \item 若 P 的请求时间戳更小，延迟对 j 的回复；
+  \item 若 j 的时间戳更小，立即回复，自己等待；
+  \item 退出临界区后，发送所有延迟回复并清空集合。
+\end{enumerate}
+\end{frame}
+
+\begin{frame}{Maekawa：quorum 交集为什么保证互斥？}
+\begin{itemize}
+  \item 每个请求只向自己的 quorum 集合发送；
+  \item 任意两个 quorum 至少有一个公共站点；
+  \item 公共站点不能同时许可两个请求；
+  \item 因此两个请求不可能同时获得完整 quorum；
+  \item 代价是 quorum 内部可能形成等待环，需要 INQUIRE/YIELD/FAILED。
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Maekawa 死锁的四步}
+\begin{enumerate}
+  \item A 拿到站点 q1，等待 q2；
+  \item B 拿到 q2，等待 q3；
+  \item C 拿到 q3，等待 q1；
+  \item 形成 $A\rightarrow B\rightarrow C\rightarrow A$ 的许可等待环；
+  \item 站点通过 INQUIRE 撤回低优先级许可，YIELD 给出资源，打破环。
+\end{enumerate}
+\end{frame}
+
+\begin{frame}{Token 算法：令牌丢了怎么办？}
+\begin{itemize}
+  \item Suzuki--Kasami 依赖唯一广播 token；
+  \item token 丢失可能让所有请求者永久等待；
+  \item 不能简单地“超时后各自生成 token”，否则会破坏互斥；
+  \item 需要 epoch、选主或共识来确认旧 token 已失效；
+  \item 新 token 必须携带每个请求的序号，避免重复进入。
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Raymond 树算法的请求路径}
+\begin{center}
+\begin{tikzpicture}[>=Latex,node distance=11mm and 16mm]
+\nodebox[minimum width=1.8cm]{ADSBlue}{ra}{A};
+\nodebox[right=of ra,minimum width=1.8cm]{ADSOrange}{rb}{B};
+\nodebox[right=of rb,minimum width=1.8cm]{ADSGreen}{rc}{C};
+\nodebox[below=of rb,minimum width=1.8cm]{ADSGray}{rd}{D};
+\draw[ADSGray,thick] (ra)--(rb)--(rc) (rb)--(rd);
+\draw[\arrow,ADSBlue,thick] (rd)--node[right,font=\scriptsize]{REQUEST}(rb);
+\draw[\arrow,ADSOrange,thick] (rb)--node[above,font=\scriptsize]{PRIVILEGE}(rd);
+\end{tikzpicture}
+\end{center}
+\begin{itemize}
+  \item 每个节点维护 token 的方向和等待队列；
+  \item 请求沿树向 token 所在方向传播，令牌沿反方向返回；
+  \item 树结构降低广播，但 churn 时需要修复方向。
+\end{itemize}
+\end{frame}
+
+\begin{frame}{公平性：互斥安全之外还要看什么？}
+\begin{itemize}
+  \item bounded waiting：请求后最多等待多少个其他请求；
+  \item starvation：某个请求是否可能一直被跳过；
+  \item throughput：临界区之间的空闲间隔；
+  \item synchronization delay：退出到下一个进入之间的消息成本；
+  \item AI GPU 场景还要考虑短作业优先、租户配额和 gang scheduling。
+\end{itemize}
+\end{frame}
+
+\begin{frame}{GPU 独占分配的互斥协议}
+\begin{enumerate}
+  \item 作业申请 GPU 资源并携带 lease/epoch；
+  \item 仲裁器授予唯一 token，记录租户、作业和过期时间；
+  \item 作业完成或租约过期后释放 token；
+  \item 旧作业恢复时，GPU 驱动检查 fencing token；
+  \item 只有持有最新 epoch 的作业可以写显存 checkpoint。
+\end{enumerate}
+\end{frame}
+
+\begin{frame}{课堂练习：三个算法的选择}
+\begin{tabularx}{\linewidth}{>{\bfseries}p{3.2cm}XX}
+\toprule
+低负载小集群 & Ricart--Agrawala & 全广播换取简单证明 \\
+固定树和高请求率 & Raymond & 复用 token，减少广播 \\
+quorum 已天然存在 & Maekawa & 利用交集，但必须处理死锁 \\
+跨故障域 GPU & token + epoch/fencing & 防止 token 丢失和旧实例双占用 \\
+\bottomrule
+\end{tabularx}
+\end{frame}
+
+\begin{frame}{本讲总结}
+\begin{enumerate}
+  \item 分布式互斥的安全性来自全序、唯一 token 或 quorum 交集；
+  \item 活性需要可靠消息、故障假设、无环等待或超时恢复；
+  \item Lamport/Ricart--Agrawala 易理解但全广播；Maekawa 降低规模却要处理死锁；
+  \item Suzuki--Kasami 与 Raymond 把进入权显式化，利用序号或树路径减少成本；
+  \item AI 平台里的 GPU、模型发布和分片维护都可以用同一套“唯一许可”视角分析。
+\end{enumerate}
+\vfill
+\callout{下一讲衔接}{当多个资源形成环形等待时，互斥之外还要检测和处理分布式死锁。}
+\end{frame}
+
+\begin{frame}{课后题}
+\begin{enumerate}
+  \item 证明 Ricart--Agrawala 在 FIFO 信道下的互斥性；
+  \item 比较 Lamport、Ricart--Agrawala 和 Maekawa 在低负载、高负载下的消息成本；
+  \item 用 7 节点树模拟 Raymond 的 REQUEST/PRIVILEGE 流程；
+  \item 设计一个 GPU 独占租约协议，说明 token 丢失和租约超时后的恢复策略。
+\end{enumerate}
+\end{frame}
+
+\end{document}

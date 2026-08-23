@@ -1,0 +1,67 @@
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{ads-beamer-theme}[2026/08/20 Advanced Distributed Systems Beamer style]
+
+\RequirePackage{ctex}
+\RequirePackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,fit,calc,matrix,shapes.geometric,decorations.pathreplacing}
+\RequirePackage{graphicx}
+\RequirePackage{booktabs,array,tabularx,multicol,adjustbox}
+\RequirePackage{amsmath,amssymb}
+\RequirePackage{ragged2e}
+\RequirePackage{hyperref}
+
+\definecolor{ADSBlue}{HTML}{0000E6}
+\definecolor{ADSDarkBlue}{HTML}{0B1F5E}
+\definecolor{ADSOrange}{HTML}{F5A400}
+\definecolor{ADSLightBlue}{HTML}{EAF1FF}
+\definecolor{ADSLightGray}{HTML}{F3F5F8}
+\definecolor{ADSGray}{HTML}{5B6470}
+\definecolor{ADSGreen}{HTML}{0A8F6A}
+\hypersetup{colorlinks=true,urlcolor=ADSBlue,linkcolor=ADSBlue}
+
+\setCJKmainfont{Heiti SC}
+\setCJKsansfont{Heiti SC}
+\setCJKmonofont{STSong}
+\setmainfont{Times New Roman}
+\setsansfont{Helvetica Neue}
+\setbeamersize{text margin left=8mm,text margin right=8mm}
+\setbeamercolor{normal text}{fg=black,bg=white}
+\setbeamercolor{structure}{fg=ADSBlue}
+\setbeamercolor{frametitle}{fg=ADSBlue,bg=white}
+\setbeamerfont{frametitle}{family=\sffamily,series=\bfseries,size=\Large}
+\setbeamerfont{framesubtitle}{size=\normalsize}
+\setbeamercolor{framesubtitle}{fg=ADSGray}
+\setbeamertemplate{navigation symbols}{}
+\setbeamertemplate{frametitle}{%
+  \vspace{1.5mm}\noindent\color{ADSBlue}\rule{\linewidth}{0.8pt}\par\vspace{1.2mm}%
+  \insertframetitle\par\vspace{0.5mm}%
+}
+\setbeamertemplate{footline}{%
+  \leavevmode\hbox{\begin{beamercolorbox}[wd=.72\paperwidth,ht=3.5ex,dp=1.5ex,leftskip=8mm]{author in head/foot}%
+  \scriptsize\color{ADSGray}高级分布式系统\quad/\quad Advanced Distributed Systems
+  \end{beamercolorbox}\begin{beamercolorbox}[wd=.28\paperwidth,ht=3.5ex,dp=1.5ex,rightskip=8mm plus1fil]{date in head/foot}%
+  \scriptsize\color{ADSBlue}\insertframenumber
+  \end{beamercolorbox}}}%
+
+\newcommand{\key}[1]{\textcolor{ADSBlue}{\textbf{#1}}}
+\newcommand{\orange}[1]{\textcolor{ADSOrange}{\textbf{#1}}}
+\newcommand{\gray}[1]{\textcolor{ADSGray}{#1}}
+\newcommand{\term}[2]{\textbf{#1}\;(\textit{#2})}
+\newcommand{\blocktitle}[1]{\vspace{1mm}\colorbox{ADSBlue}{\parbox{0.92\linewidth}{\color{white}\small\bfseries #1}}}
+\newcommand{\callout}[2]{\begin{beamercolorbox}[rounded=true,sep=1.8mm,wd=\linewidth]{block body}\textbf{#1}\quad #2\end{beamercolorbox}}
+\newcommand{\smallnote}[1]{\vspace{1mm}{\scriptsize\color{ADSGray}#1}}
+\newcommand{\nodebox}[4][]{\node[draw=#2!70!black,fill=#2!10,rounded corners=2pt,minimum width=2.2cm,minimum height=0.62cm,align=center,font=\scriptsize,#1] (#3) {#4}}
+\newcommand{\arrow}{-{Latex[length=2mm,width=1.3mm]}}
+\newcommand{\sectionframe}[2]{%
+  \begin{frame}[plain]
+  \begin{tikzpicture}[remember picture,overlay]
+    \fill[ADSBlue] (current page.north west) rectangle (current page.south east);
+    \fill[ADSOrange] (current page.north west) rectangle ([yshift=-1.7mm]current page.north east);
+    \node[anchor=west,text width=12.6cm,align=left] at ([xshift=1.25cm,yshift=.35cm]current page.west)
+      {\fontsize{29}{35}\selectfont\color{white}\bfseries #1};
+    \node[anchor=west,text width=12.6cm,align=left] at ([xshift=1.25cm,yshift=-1.25cm]current page.west)
+      {\large\color{white!78}#2};
+  \end{tikzpicture}
+  \end{frame}}
+
+\endinput
